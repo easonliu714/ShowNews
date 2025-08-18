@@ -18,3 +18,15 @@
 ## 部署方式
 
 ### 本地運行
+pip install -r requirements.txt
+python app.py
+
+
+### Render部署
+1. 連接GitHub Repository
+2. 設定環境變數
+3. 自動部署
+
+## 授權
+
+MIT License
