@@ -3,6 +3,7 @@ import json
 import random
 import re
 import aiohttp
+import asyncio
 from datetime import datetime
 from pathlib import Path
 from bs4 import BeautifulSoup
@@ -176,15 +177,38 @@ async def extract_event_details_simple(url, platform, session, list_event=None):
         page_text = soup.get_text(" ", strip=True)
         date_match = re.search(r'(\d{4}[./]\d{1,2}[./]\d{1,2})', page_text)
         if date_match: details['date'] = date_match.group(1).strip()
-        loc_match = re.search(r'(?:地點|場地)[:：]?\s*([^\s，。]+)', page_text)
-        if loc_match: details['location'] = loc_match.group(1).strip()
+        loc_match = None
+
+        if platform == "年代售票":
+            # 移除多餘字串，年代表演場地可能須用CSS抓取，暫用regex替代，您可進一步微調
+            details['title'] = details['title'].replace("年代售票 |", "").strip()
+            # 取得較精準地點 (示範用 regex拉取 "演出地點" 欄位附近文字)
+            loc_match = re.search(r'演出地點[:：]\s*([^\s，。]+)', page_text)
+
+        elif platform == "UDN售票網":
+            details['title'] = details['title'].replace(" | udn售票網", "").strip()
+            loc_match = re.search(r'地點[:：]\s*([^\s，。]+)', page_text)
+
+        elif platform == "寬宏":
+            # 因寬宏標題全是系統名，改從列表title補足，詳細頁定位示意:
+            if list_event and list_event.get('title'):
+                details['title'] = list_event['title']
+            loc_match = re.search(r'場地[:：]\s*([^\s，。]+)', page_text)
+
+        else:
+            loc_match = re.search(r'(?:地點|場地|演出地點)[:：]?\s*([^\s，。]+)', page_text)
+
+        if loc_match:
+            details['location'] = loc_match.group(1).strip()
+
         return details
     except Exception as e:
         append_log_run(f"詳細頁面提取失敗：{url} - {e}")
         return details
 
-async def send_telegram_message_with_retry(event, is_init=False, downgraded=False, max_retries=1):
-    if not bot: return False, "Bot not ready"
+async def send_telegram_message_with_retry(event, is_init=False, downgraded=False, max_retries=3):
+    if not bot: 
+        return False, "Bot not ready"
     for attempt in range(max_retries):
         try:
             header = "🆕 新增活動通知"
@@ -207,13 +231,15 @@ async def send_telegram_message_with_retry(event, is_init=False, downgraded=Fals
             msg = "\n".join(lines)
             if len(msg)>4096:
                 msg = "\n".join(lines[:6]) + f"\n\n📌 [點我查看詳情]({event.get('url','')})"
+
             await bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode=ParseMode.MARKDOWN_V2)
+            # 延遲2秒避免 flood control
+            await asyncio.sleep(2)
             return True, None
         except Exception as err:
             append_log_run(f"發送失敗 (第{attempt+1}次)：{event.get('title','(無標題)')} => {err}")
-            if attempt < max_retries-1:
-                import asyncio
-                await asyncio.sleep(3*(attempt+1))
+            wait = 5 * (attempt + 1)
+            await asyncio.sleep(wait)
     return False, "Send failed"
 
 async def send_platform_summary_message(platform_stats):
@@ -233,7 +259,6 @@ async def send_platform_summary_message(platform_stats):
 
 async def test_crawl_and_notify():
     async with aiohttp.ClientSession() as session:
-        all_events = []
         platform_stats = {}
         log = load_log()
 
@@ -254,8 +279,7 @@ async def test_crawl_and_notify():
 
             platform_stats[platform]['new'] = len(new_events)
             count_sent = 0
-            # 只發送最多5則訊息供測試
-            for event in new_events[:5]:
+            for event in new_events[:5]:  # 每平台最多只發5則
                 details = await extract_event_details_simple(event['url'], event['platform'], session, list_event=event)
                 merged = event.copy()
                 merged.update(details)
@@ -266,7 +290,7 @@ async def test_crawl_and_notify():
                     save_log(log)
             platform_stats[platform]['sent'] = count_sent
 
-        # 最後發送個平台統計訊息
+        # 最後發送平台彙整訊息
         await send_platform_summary_message(platform_stats)
 
         return {
