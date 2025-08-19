@@ -166,7 +166,7 @@ async def extract_event_details_simple(url, platform, session, list_event=None):
         append_log_run(f"詳細頁面提取失敗：{url} - {e}")
         return details
 
-async def send_telegram_message_with_retry(event, is_init=False, downgraded=False, max_retries=1):
+async def send_telegram_message_with_retry(event, is_init=False, downgraded=False, max_retries=3):
     if not bot: return False, "Bot not ready"
     for attempt in range(max_retries):
         try:
@@ -194,10 +194,13 @@ async def send_telegram_message_with_retry(event, is_init=False, downgraded=Fals
             return True, None
         except Exception as err:
             append_log_run(f"發送失敗 (第{attempt+1}次)：{event.get('title','(無標題)')} => {err}")
-            if attempt < max_retries-1:
-                wait = 3*(attempt+1)
-                import asyncio
-                await asyncio.sleep(wait)
+            # Flood control: 等待報錯回傳的秒數
+            flood_match = re.search(r"Flood control exceeded\. Retry in (\d+) seconds", str(err))
+            if flood_match:
+                wait = int(flood_match.group(1))
+                await asyncio.sleep(wait + 1)
+            else:
+                await asyncio.sleep(3 * (attempt + 1))
     return False, "Send failed"
 
 async def test_crawl_and_notify():
@@ -211,7 +214,9 @@ async def test_crawl_and_notify():
         log = load_log()
         new_events = [e for e in events if e['url'] not in log]
         sent_count, failed_count = 0, 0
-        for event in new_events:
+        BATCH_LIMIT = 15   # 一次最多發送15則（建議10~20，看情況可調）
+        batch_events = new_events[:BATCH_LIMIT]
+        for event in batch_events:
             details = await extract_event_details_simple(event['url'], event['platform'], session, list_event=event)
             merged_event = event.copy()
             merged_event.update(details)
@@ -222,6 +227,8 @@ async def test_crawl_and_notify():
                 save_log(log)
             else:
                 failed_count += 1
+            # 每條sleep 1.5秒，降低限流、timeout風險
+            await asyncio.sleep(1.5)
         return {
             "success": True,
             "new_count": len(new_events),
