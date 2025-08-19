@@ -10,13 +10,17 @@ from telegram import Bot
 from telegram.constants import ParseMode
 
 PLATFORMS = [
-    "KKTIX", "拓元售票", "OPENTIX"
+    "KKTIX", "拓元售票", "OPENTIX", "寬宏", "年代售票", "UDN售票網", "iBon售票"
 ]
 
 DETAIL_URL_WHITELIST = {
     "KKTIX": re.compile(r"^https?://[a-z0-9-]+\.kktix\.cc/events/[A-Za-z0-9-_]+", re.I),
     "拓元售票": re.compile(r"^https?://(www\.)?tixcraft\.com/activity/detail/[A-Za-z0-9_-]+", re.I),
-    "OPENTIX": re.compile(r"^https?://(www\.)?opentix\.life/event/\d+", re.I)
+    "OPENTIX": re.compile(r"^https?://(www\.)?opentix\.life/event/\d+", re.I),
+    "寬宏": re.compile(r"^https?://(www\.)?kham\.com\.tw/application/UTK02/UTK0201_\.aspx\?PRODUCT_ID=[A-Z0-9]+", re.I),
+    "年代售票": re.compile(r"^https?://(www\.)?ticket\.com\.tw/application/UTK02/UTK0201_\.aspx\?PRODUCT_ID=[A-Z0-9]+", re.I),
+    "UDN售票網": re.compile(r"^https?://(www\.)?tickets\.udnfunlife\.com/application/UTK02/UTK0201_\.aspx\?PRODUCT_ID=[A-Z0-9]+", re.I),
+    "iBon售票": re.compile(r"^https?://(www\.)?ticket\.ibon\.com\.tw/", re.I),
 }
 
 TOKEN = os.getenv("TG_BOT_TOKEN")
@@ -94,6 +98,10 @@ async def fetch_platform_events_list(session, platform):
         "KKTIX": ("https://kktix.com/events", 'a[href*="/events/"]', "KKTIX"),
         "OPENTIX": ("https://www.opentix.life/event", 'a[href*="/event/"]', "OPENTIX"),
         "拓元售票": ("https://tixcraft.com/activity", 'a[href*="/activity/detail/"]', "拓元售票"),
+        "寬宏": ("https://kham.com.tw/", 'a[href*="/application/UTK02/UTK0201_"]', "寬宏"),
+        "年代售票": ("https://ticket.com.tw/", 'a[href*="/application/UTK02/UTK0201_"]', "年代售票"),
+        "UDN售票網": ("https://tickets.udnfunlife.com/", 'a[href*="/application/UTK02/UTK0201_"]', "UDN售票網"),
+        "iBon售票": ("https://ticket.ibon.com.tw/", 'a[href^="https://ticket.ibon.com.tw/"]', "iBon售票")
     }
     if platform not in url_selector_map:
         return []
@@ -109,16 +117,25 @@ async def fetch_platform_events_list(session, platform):
         for link in links:
             href = link.get('href','')
             title = safe_get_text(link)
-            if not href or not title or len(title)<3: continue
+            if not href or not title or len(title)<3: 
+                continue
             if not href.startswith("http"):
                 if platform=="OPENTIX":
                     href = "https://www.opentix.life" + href
-                if platform=="KKTIX":
+                elif platform=="KKTIX":
                     href = "https://kktix.com" + href
-                if platform=="拓元售票":
-                    href = "https://tixcraft.com"+href
-            if wl and not wl.match(href): continue
-            if href in seen_urls: continue
+                elif platform=="拓元售票":
+                    href = "https://tixcraft.com" + href
+                elif platform=="寬宏":
+                    href = "https://kham.com.tw" + href
+                elif platform=="年代售票":
+                    href = "https://ticket.com.tw" + href
+                elif platform=="UDN售票網":
+                    href = "https://tickets.udnfunlife.com" + href
+            if wl and not wl.match(href):
+                continue
+            if href in seen_urls:
+                continue
             events.append({
                 "title": title.strip(), "url": href, "platform": plat_name, "type": get_event_category_from_title(title)
             })
@@ -166,7 +183,7 @@ async def extract_event_details_simple(url, platform, session, list_event=None):
         append_log_run(f"詳細頁面提取失敗：{url} - {e}")
         return details
 
-async def send_telegram_message_with_retry(event, is_init=False, downgraded=False, max_retries=3):
+async def send_telegram_message_with_retry(event, is_init=False, downgraded=False, max_retries=1):
     if not bot: return False, "Bot not ready"
     for attempt in range(max_retries):
         try:
@@ -189,50 +206,70 @@ async def send_telegram_message_with_retry(event, is_init=False, downgraded=Fals
             lines.append(f"\n📌 [點我查看詳情]({event.get('url','')})")
             msg = "\n".join(lines)
             if len(msg)>4096:
-                msg = "\n".join(lines[:6])+f"\n\n📌 [點我查看詳情]({event.get('url','')})"
+                msg = "\n".join(lines[:6]) + f"\n\n📌 [點我查看詳情]({event.get('url','')})"
             await bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode=ParseMode.MARKDOWN_V2)
             return True, None
         except Exception as err:
             append_log_run(f"發送失敗 (第{attempt+1}次)：{event.get('title','(無標題)')} => {err}")
-            # Flood control: 等待報錯回傳的秒數
-            flood_match = re.search(r"Flood control exceeded\. Retry in (\d+) seconds", str(err))
-            if flood_match:
-                wait = int(flood_match.group(1))
-                await asyncio.sleep(wait + 1)
-            else:
-                await asyncio.sleep(3 * (attempt + 1))
+            if attempt < max_retries-1:
+                import asyncio
+                await asyncio.sleep(3*(attempt+1))
     return False, "Send failed"
+
+async def send_platform_summary_message(platform_stats):
+    if not bot:
+        return
+    try:
+        lines = ["📊 活動推播統計報告"]
+        for plat, stat in platform_stats.items():
+            count_new = stat.get('new',0)
+            count_sent = stat.get('sent',0)
+            lines.append(f"🧾 {plat}: 新活動數 {count_new}，成功推送 {count_sent}")
+        lines.append(f"時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        msg = "\n".join(lines)
+        await bot.send_message(chat_id=CHAT_ID, text=msg)
+    except Exception as e:
+        append_log_run(f"推播統計訊息失敗: {e}")
 
 async def test_crawl_and_notify():
     async with aiohttp.ClientSession() as session:
-        all_events=[]
-        for platform in PLATFORMS:
-            lst = await fetch_platform_events_list(session, platform)
-            all_events.extend(lst)
-        seen_url = set()
-        events = [e for e in all_events if e['url'] not in seen_url and not seen_url.add(e['url'])]
+        all_events = []
+        platform_stats = {}
         log = load_log()
-        new_events = [e for e in events if e['url'] not in log]
-        sent_count, failed_count = 0, 0
-        BATCH_LIMIT = 15   # 一次最多發送15則（建議10~20，看情況可調）
-        batch_events = new_events[:BATCH_LIMIT]
-        for event in batch_events:
-            details = await extract_event_details_simple(event['url'], event['platform'], session, list_event=event)
-            merged_event = event.copy()
-            merged_event.update(details)
-            ok, err = await send_telegram_message_with_retry(merged_event, is_init=True)
-            if ok:
-                sent_count += 1
-                log[event['url']] = {'title': merged_event.get('title', event['title'])}
-                save_log(log)
-            else:
-                failed_count += 1
-            # 每條sleep 1.5秒，降低限流、timeout風險
-            await asyncio.sleep(1.5)
+
+        for platform in PLATFORMS:
+            events = await fetch_platform_events_list(session, platform)
+            platform_stats[platform] = {'new':0, 'sent':0}
+            if not events:
+                append_log_run(f"{platform} 未抓取到新活動")
+                continue
+            # 去重與過去紀錄比對
+            seen_url = set()
+            filtered = []
+            for e in events:
+                if e['url'] not in seen_url:
+                    seen_url.add(e['url'])
+                    filtered.append(e)
+            new_events = [e for e in filtered if e['url'] not in log]
+
+            platform_stats[platform]['new'] = len(new_events)
+            count_sent = 0
+            # 只發送最多5則訊息供測試
+            for event in new_events[:5]:
+                details = await extract_event_details_simple(event['url'], event['platform'], session, list_event=event)
+                merged = event.copy()
+                merged.update(details)
+                ok, err = await send_telegram_message_with_retry(merged, is_init=True)
+                if ok:
+                    count_sent += 1
+                    log[merged['url']] = {'title': merged.get('title', event['title'])}
+                    save_log(log)
+            platform_stats[platform]['sent'] = count_sent
+
+        # 最後發送個平台統計訊息
+        await send_platform_summary_message(platform_stats)
+
         return {
             "success": True,
-            "new_count": len(new_events),
-            "sent_count": sent_count,
-            "failed_count": failed_count,
-            "new_titles": [e['title'] for e in new_events]
+            "platform_stats": platform_stats
         }
