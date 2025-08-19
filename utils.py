@@ -1,6 +1,5 @@
 import os
 import json
-import asyncio
 import random
 import re
 import aiohttp
@@ -10,33 +9,32 @@ from bs4 import BeautifulSoup
 from telegram import Bot
 from telegram.constants import ParseMode
 
-# 定義售票平台 & 允許的URL pattern，可根據需求擴充
 PLATFORMS = [
-    "KKTIX", "拓元售票", "OPENTIX", "寬宏", "年代售票", "UDN售票網", "iBon售票", "Event Go"
+    "KKTIX", "拓元售票", "OPENTIX"
 ]
 
 DETAIL_URL_WHITELIST = {
     "KKTIX": re.compile(r"^https?://[a-z0-9-]+\.kktix\.cc/events/[A-Za-z0-9-_]+", re.I),
     "拓元售票": re.compile(r"^https?://(www\.)?tixcraft\.com/activity/detail/[A-Za-z0-9_-]+", re.I),
-    "OPENTIX": re.compile(r"^https?://(www\.)?opentix\.life/event/\d+", re.I),
-    "年代售票": re.compile(r"^https?://(www\.)?ticket\.com\.tw/application/UTK02/UTK0201_\.aspx\?PRODUCT_ID=[A-Z0-9]+", re.I),
-    "UDN售票網": re.compile(r"^https?://(www\.)?tickets\.udnfunlife\.com/application/UTK02/UTK0201_\.aspx\?PRODUCT_ID=[A-Z0-9]+", re.I),
-    "iBon售票": re.compile(r"^https?://(www\.)?ticket\.ibon\.com\.tw/", re.I),
-    "寬宏": re.compile(r"^https?://(www\.)?kham\.com\.tw/application/UTK02/UTK0201_\.aspx\?PRODUCT_ID=[A-Z0-9]+", re.I),
-    "Event Go": re.compile(r"^https?://eventgo\.bnextmedia\.com\.tw/event/detail[^\s]*$", re.I),
+    "OPENTIX": re.compile(r"^https?://(www\.)?opentix\.life/event/\d+", re.I)
 }
 
-# Telegram參數
 TOKEN = os.getenv("TG_BOT_TOKEN")
 CHAT_ID = os.getenv("TG_CHAT_ID")
-bot = Bot(token=TOKEN) if TOKEN else None
+bot = Bot(token=TOKEN) if TOKEN and CHAT_ID else None
 
 RUN_LOG = "run.log"
 LOG_FILE = 'Show_News_log.json'
 
-# ===============
-# UTIL FUNCTION
-# ===============
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Safari/605.1.15',
+]
+REQUEST_HEADERS = {
+    'User-Agent': random.choice(USER_AGENTS),
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+}
+
 def escape_markdown_v2(text: str) -> str:
     if not isinstance(text, str): text = str(text)
     escape_chars = r'_*[]()~`>#+=|{}.!-'
@@ -80,7 +78,7 @@ def get_event_category_from_title(title):
         "戲劇表演": ["戲劇", "舞台劇", "喜劇", "劇場", "劇團"],
         "舞蹈表演": ["舞蹈", "芭蕾"],
         "展覽/博覽": ["展覽", "特展", "藝術展", "美術館"],
-        "親子活動": ["親子", "兒童", "家庭"],
+        "親子活動": ["親子", "兒童", "寶寶", "家庭"],
         "電影放映": ["電影", "影展"],
         "體育賽事": ["賽事", "馬拉松", "路跑", "球賽"],
         "講座/工作坊": ["講座", "工作坊"],
@@ -91,22 +89,7 @@ def get_event_category_from_title(title):
         if any(k in title_lower for k in keys): return cat
     return "其他"
 
-USER_AGENTS = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Safari/605.1.15',
-]
-
-REQUEST_HEADERS = {
-    'User-Agent': random.choice(USER_AGENTS),
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-}
-
-# ===================
-# 平台列表爬取 (列表頁!!簡化版, 需細分化可擴充)
-# ===================
 async def fetch_platform_events_list(session, platform):
-    # 對不同平台動態設置URL及Selector
-    # 實務上可進一步分平台函式
     url_selector_map = {
         "KKTIX": ("https://kktix.com/events", 'a[href*="/events/"]', "KKTIX"),
         "OPENTIX": ("https://www.opentix.life/event", 'a[href*="/event/"]', "OPENTIX"),
@@ -127,7 +110,6 @@ async def fetch_platform_events_list(session, platform):
             href = link.get('href','')
             title = safe_get_text(link)
             if not href or not title or len(title)<3: continue
-            # 補全主域名
             if not href.startswith("http"):
                 if platform=="OPENTIX":
                     href = "https://www.opentix.life" + href
@@ -146,9 +128,6 @@ async def fetch_platform_events_list(session, platform):
         append_log_run(f"{platform} 列表擷取錯誤: {e}")
         return []
 
-# ===================
-# 活動詳細資訊補齊
-# ===================
 async def extract_event_details_simple(url, platform, session, list_event=None):
     details = {'date': '詳內文', 'location': '詳內文', 'ticket_date': '詳內文', 'description': '', 'title': '詳內文'}
     if list_event and 'title' in list_event:
@@ -157,7 +136,6 @@ async def extract_event_details_simple(url, platform, session, list_event=None):
         async with session.get(url, headers=REQUEST_HEADERS, timeout=20, ssl=False) as resp:
             html = await resp.text()
         soup = BeautifulSoup(html, "html.parser")
-        # 嘗試 title、date、location、description補齊
         title_candidates = [soup.find("title"), soup.find("h1"),
                             soup.find("meta", attrs={"property": "og:title"}),
                             soup.find("meta", attrs={"name": "twitter:title"})]
@@ -178,7 +156,6 @@ async def extract_event_details_simple(url, platform, session, list_event=None):
                     if len(desc_text)>150: desc_text=desc_text[:150]+"..."
                     details['description'] = desc_text
                     break
-        # 嘗試正則拉取日期、地點
         page_text = soup.get_text(" ", strip=True)
         date_match = re.search(r'(\d{4}[./]\d{1,2}[./]\d{1,2})', page_text)
         if date_match: details['date'] = date_match.group(1).strip()
@@ -189,9 +166,6 @@ async def extract_event_details_simple(url, platform, session, list_event=None):
         append_log_run(f"詳細頁面提取失敗：{url} - {e}")
         return details
 
-# ===================
-# 推送 Telegram 訊息
-# ===================
 async def send_telegram_message_with_retry(event, is_init=False, downgraded=False, max_retries=1):
     if not bot: return False, "Bot not ready"
     for attempt in range(max_retries):
@@ -215,7 +189,6 @@ async def send_telegram_message_with_retry(event, is_init=False, downgraded=Fals
             lines.append(f"\n📌 [點我查看詳情]({event.get('url','')})")
             msg = "\n".join(lines)
             if len(msg)>4096:
-                # 強制降級
                 msg = "\n".join(lines[:6])+f"\n\n📌 [點我查看詳情]({event.get('url','')})"
             await bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode=ParseMode.MARKDOWN_V2)
             return True, None
@@ -223,19 +196,16 @@ async def send_telegram_message_with_retry(event, is_init=False, downgraded=Fals
             append_log_run(f"發送失敗 (第{attempt+1}次)：{event.get('title','(無標題)')} => {err}")
             if attempt < max_retries-1:
                 wait = 3*(attempt+1)
+                import asyncio
                 await asyncio.sleep(wait)
     return False, "Send failed"
 
-# ===================
-# 核心爬蟲流程 (test模式會調用)
-# ===================
 async def test_crawl_and_notify():
     async with aiohttp.ClientSession() as session:
         all_events=[]
-        for platform in ("KKTIX", "拓元售票", "OPENTIX"):
+        for platform in PLATFORMS:
             lst = await fetch_platform_events_list(session, platform)
             all_events.extend(lst)
-        # 去重
         seen_url = set()
         events = [e for e in all_events if e['url'] not in seen_url and not seen_url.add(e['url'])]
         log = load_log()
